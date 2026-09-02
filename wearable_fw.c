@@ -8,7 +8,7 @@
 
 #define RING_BUF_SIZE 16    // Ring buffer size
 #define ALPHA_EMA 0.3f       // Low-pass filter smoothing coefficient
-#define SPIKE_THRESHOLD 110  // Elevated HR threshold
+#define SPIKE_THRESHOLD 80  // Elevated HR threshold
 #define IMPACT_DELTA 25      // Sudden jump threshold indicating potential fall/anomaly
 
 // Device States
@@ -31,6 +31,12 @@ typedef struct {
 SensorBuffer_t g_sensor_buffer;
 SystemState_t g_current_state = SYSTEM_STATE_SLEEP;
 bool g_emergency_flag = false;
+
+// DSP Filter: Exponential Moving Average (EMA) Low-Pass Filter
+uint32_t apply_ema_filter(uint32_t raw_sample, float *prev_ema) {
+    *prev_ema = (ALPHA_EMA * (float)raw_sample) + ((1.0f - ALPHA_EMA) * (*prev_ema));
+    return (uint32_t)(*prev_ema);
+}
 
 // Buffer Push Function
 void buffer_push(SensorBuffer_t *buf, uint32_t val) {
@@ -145,11 +151,6 @@ void* task_ble_sync(void* arg) {
     return NULL;
 }
 
-// DSP Filter: Exponential Moving Average (EMA) Low-Pass Filter
-uint32_t apply_ema_filter(uint32_t raw_sample, float *prev_ema) {
-    *prev_ema = (ALPHA_EMA * (float)raw_sample) + ((1.0f - ALPHA_EMA) * (*prev_ema));
-    return (uint32_t)(*prev_ema);
-}
 
 int main(void) {
     pthread_t thread_sensor, thread_ble;
