@@ -1,3 +1,6 @@
+"""
+Virtual Wearable Firmware with condition signaling for high heart beat or drastic change in heart rate
+"""
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdbool.h>
@@ -6,35 +9,35 @@
 #include <unistd.h>
 #include <time.h>
 
-#define RING_BUF_SIZE 16    // Ring buffer size
-#define ALPHA_EMA 0.3f       // Low-pass filter smoothing coefficient
-#define SPIKE_THRESHOLD 80  // Elevated HR threshold
-#define IMPACT_DELTA 25      // Sudden jump threshold indicating potential fall/anomaly
+#define RING_BUF_SIZE 16    // size
+#define EMA_NUM 0.3       // smoothing data using EMA
+//threshold for anomaly detection
+#define SPIKE_THRESHOLD 80  
+#define IMPACT_DELTA 25     
 
-// Device States
+// states of the device (not used yet)
 typedef enum {
-    SYSTEM_STATE_SLEEP,      // Sleep state
-    SYSTEM_STATE_SAMPLING,   // Sampling state
-    SYSTEM_STATE_BLE_SYNC    // BLE sync state
+    SYSTEM_STATE_SLEEP,      
+    SYSTEM_STATE_SAMPLING,  
+    SYSTEM_STATE_BLE_SYNC   
 } SystemState_t;
 
-// Ring Buffer Data Structure
+// data buffer structure
 typedef struct {
     uint32_t bpm_data[RING_BUF_SIZE];
     uint8_t head;
     uint8_t tail;
-    pthread_mutex_t lock; // Protects against concurrent access
-    pthread_cond_t alert_signal; // Alert signal for high heart rate
+    pthread_mutex_t lock; // protects against race condition
+    pthread_cond_t alert_signal; // emergency alert signal
 } SensorBuffer_t;
 
-// Global System Shared Objects
 SensorBuffer_t g_sensor_buffer;
 SystemState_t g_current_state = SYSTEM_STATE_SLEEP;
 bool g_emergency_flag = false;
 
-// DSP Filter: Exponential Moving Average (EMA) Low-Pass Filter
+// smoothening out the data as per practice
 uint32_t apply_ema_filter(uint32_t raw_sample, float *prev_ema) {
-    *prev_ema = (ALPHA_EMA * (float)raw_sample) + ((1.0f - ALPHA_EMA) * (*prev_ema));
+    *prev_ema = (EMA_NUM * (float)raw_sample) + ((1.0 - EMA_NUM) * (*prev_ema));
     return (uint32_t)(*prev_ema);
 }
 
@@ -59,30 +62,30 @@ bool buffer_pop(SensorBuffer_t *buf, uint32_t *out_val) {
     return success;
 }
 
-// TASK 1: Simulated Hardware Interrupt Routine (100ms Heart Rate Sampling)
+// Simulating data creation and data processing
 void* task_sensor_isr(void* arg) {
-    float prev_ema_val = 70.0f;
+    float prev_ema_val = 70.0;
     uint32_t prev_filtered_val = 70;
     uint32_t time_counter = 0;
 
     while (1) {
         time_counter += 100;
 
-        // 1. Generate raw reading with an artificial anomaly spike every 2.5 seconds
+        // make an artificial spike every 2.5 seconds
         uint32_t simulated_bpm = 70 + (rand() % 15);
         if (time_counter % 2500 == 0) {
             simulated_bpm = 135; // Artificial anomaly spike
         }
 
-        // 2. Apply DSP Low-Pass Filter
+        // normalize the readings
         uint32_t filtered_bpm = apply_ema_filter(simulated_bpm, &prev_ema_val);
         buffer_push(&g_sensor_buffer, filtered_bpm);
         g_current_state = SYSTEM_STATE_SAMPLING;
 
-        printf("[SENSOR ISR] t=%4ums | Raw: %3u BPM | DSP Filtered: %3u BPM\n", 
+        printf("[Sensor Detected heart beat] t=%u | Raw: %u BPM | Refined: %u BPM\n", 
                 time_counter, simulated_bpm, filtered_bpm);
 
-        // 3. Dynamic Peak & Delta Anomaly Detection
+        // get teh delta and then comapre the thresholds
         uint32_t delta = (filtered_bpm > prev_filtered_val) ? 
                          (filtered_bpm - prev_filtered_val) : 
                          (prev_filtered_val - filtered_bpm);
@@ -90,18 +93,18 @@ void* task_sensor_isr(void* arg) {
         if (filtered_bpm > SPIKE_THRESHOLD || delta > IMPACT_DELTA) {
             pthread_mutex_lock(&g_sensor_buffer.lock);
             g_emergency_flag = true;
-            printf("   >>> [HARDWARE INTERRUPT] Anomaly Spike Triggered! Firing GPIO Signal <<<\n");
-            pthread_cond_signal(&g_sensor_buffer.alert_signal); // Instant wake-up signal
+            printf("Anomaly Spike Triggered!");
+            pthread_cond_signal(&g_sensor_buffer.alert_signal); // alert the data consumer
             pthread_mutex_unlock(&g_sensor_buffer.lock);
         }
 
         prev_filtered_val = filtered_bpm;
-        usleep(100000); // 100ms sample tick
+        usleep(100000); // wait 0.1 sec
     }
     return NULL;
 }
 
-// TASK 2: High-Priority Processing & BLE Sync Task
+// the data consumer replicating the BLE sync task
 void* task_ble_sync(void* arg) {
     uint32_t sample = 0;
     uint32_t sum = 0;
@@ -110,24 +113,24 @@ void* task_ble_sync(void* arg) {
     while (1) {
         pthread_mutex_lock(&g_sensor_buffer.lock);
         
-        // Setup 1-second timeout for periodic wake-up
+        // set 1 second timer
         struct timespec ts;
         clock_gettime(CLOCK_REALTIME, &ts);
         ts.tv_sec += 1;
 
-        // Sleep until 1 second passes OR condition signal wakes it up early
+        // get up after 1 second passes or emergency condition signal 
         pthread_cond_timedwait(&g_sensor_buffer.alert_signal, &g_sensor_buffer.lock, &ts);
         
         bool is_emergency = g_emergency_flag;
-        g_emergency_flag = false; // Reset emergency state
+        g_emergency_flag = false; // reset emergency state
         pthread_mutex_unlock(&g_sensor_buffer.lock);
 
         g_current_state = SYSTEM_STATE_BLE_SYNC;
         
         if (is_emergency) {
-            printf("\n!!! [BLE SYNC WAKEUP: HIGH-PRIORITY EMERGENCY INTERRUPT] !!!\n");
+            printf("EMERGENCY condition\n");
         } else {
-            printf("\n--- [BLE SYNC WAKEUP: ROUTINE PERIODIC SYNC] ---\n");
+            printf("\n[Normal]\n");
         }
 
         sum = 0;
@@ -138,15 +141,15 @@ void* task_ble_sync(void* arg) {
         }
 
         if (count > 0) {
-            uint32_t avg_bpm = sum / count;
-            printf("[BLE LOG] Processed %u samples. Batch Avg = %u BPM\n", count, avg_bpm);
+            uint32_t avg = sum / count;
+            printf("[Processed %u samples. Avg = %u BPM\n", count, avg);
             if (is_emergency) {
-                printf("[ALERT TRANSMITTED] Emergency Packet Sent to App over BLE!\n");
+                printf("[Critical data sent to app]\n");
             }
         }
 
         g_current_state = SYSTEM_STATE_SLEEP;
-        printf("--- [SYSTEM ENTERING LOW POWER SLEEP] ---\n");
+        printf("entering low power mode\n");
     }
     return NULL;
 }
@@ -155,19 +158,19 @@ void* task_ble_sync(void* arg) {
 int main(void) {
     pthread_t thread_sensor, thread_ble;
 
-    // Initialize mutex and condition variable
+    // initialize
     pthread_mutex_init(&g_sensor_buffer.lock, NULL);
     pthread_cond_init(&g_sensor_buffer.alert_signal, NULL);
     g_sensor_buffer.head = 0;
     g_sensor_buffer.tail = 0;
 
-    printf("Booting Virtual Wearable Firmware Target with DSP & Condition Signaling...\n");
+    printf("Starting Virtual Wearable Firmware\n");
 
-    // Spawn Firmware Tasks
+    // create
     pthread_create(&thread_sensor, NULL, task_sensor_isr, NULL);
     pthread_create(&thread_ble, NULL, task_ble_sync, NULL);
 
-    // Keep running main thread
+    // let main wait
     pthread_join(thread_sensor, NULL);
     pthread_join(thread_ble, NULL);
 
